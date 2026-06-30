@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
+import express from "express";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -651,28 +652,84 @@ async function callTool(name, args) {
   }
 }
 
-const server = new Server(
-  { name: "trinks-mcp", version: "1.0.0" },
-  { capabilities: { tools: {} } }
-);
+function buildServer() {
+  const server = new Server(
+    { name: "trinks-mcp", version: "1.0.0" },
+    { capabilities: { tools: {} } }
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+      const result = await callTool(name, args || {});
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    } catch (err) {
+      return {
+        content: [{ type: "text", text: `Erro: ${err.message}` }],
+        isError: true,
+      };
+    }
+  });
+
+  return server;
+}
+
+const app = express();
+app.use(express.json());
+
+app.post("/mcp", async (req, res) => {
+  const server = buildServer();
   try {
-    const result = await callTool(name, args || {});
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
-  } catch (err) {
-    return {
-      content: [{ type: "text", text: `Erro: ${err.message}` }],
-      isError: true,
-    };
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+    await server.connect(transport);
+    await transport.handleRequest(req, res, req.body);
+    res.on("close", () => {
+      transport.close();
+      server.close();
+    });
+  } catch (error) {
+    console.error("Erro ao processar requisição MCP:", error);
+    if (!res.headersSent) {
+      res.status(500).json({
+        jsonrpc: "2.0",
+        error: { code: -32603, message: "Internal server error" },
+        id: null,
+      });
+    }
   }
 });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
-console.error("Trinks MCP rodando.");
+app.get("/mcp", async (req, res) => {
+  res.writeHead(405).end(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Method not allowed." },
+      id: null,
+    })
+  );
+});
+
+app.delete("/mcp", async (req, res) => {
+  res.writeHead(405).end(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: "Method not allowed." },
+      id: null,
+    })
+  );
+});
+
+app.get("/", (req, res) => {
+  res.send("Trinks MCP rodando.");
+});
+
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`Trinks MCP rodando na porta ${PORT}`);
+});
